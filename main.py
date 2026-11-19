@@ -27,9 +27,9 @@ DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data.json"
 # 라벨 정규화 표: expected('+', 'x')와 filter 키('cross', 'x')를 모두 처리
 LABEL_MAP = {"+": CROSS, "cross": CROSS, "x": X_LABEL}
 
-# 3x3 기본 예시 (성능 분석의 3x3 항목용)
-SAMPLE_CROSS_3 = [[0, 1, 0], [1, 1, 1], [0, 1, 0]]
-SAMPLE_X_3 = [[1, 0, 1], [0, 1, 0], [1, 0, 1]]
+GEN_MIN_SIZE = 3        # 패턴 생성기 최소 크기
+GEN_MAX_SIZE = 100      # 패턴 생성기 최대 크기 (입력 실수로 인한 과도한 연산 방지)
+PERF_SIZES = (3, 5, 13, 25)   # 성능 분석 기본 크기
 
 
 # =========================================================
@@ -77,6 +77,42 @@ class Matrix:
     def show(self, indent="  "):
         for row in self.rows:
             print(indent + " ".join(f"{v:g}" for v in row))
+
+
+# =========================================================
+# 1-2. 보너스: 패턴 생성기 (N x N 십자가 / X)
+# =========================================================
+def _check_generator_size(n):
+    """생성 크기 검증. 정수이고 GEN_MIN_SIZE 이상이어야 한다."""
+    if isinstance(n, bool) or not isinstance(n, int):
+        raise ValueError("크기 N 은 정수여야 합니다.")
+    if n < GEN_MIN_SIZE:
+        raise ValueError(f"크기 N 은 {GEN_MIN_SIZE} 이상이어야 합니다. (입력 {n})")
+
+
+def generate_cross(n):
+    """
+    N x N 십자가(Cross) 패턴 생성: 가운데 행과 가운데 열을 1, 나머지를 0으로 채운다.
+    N 이 짝수이면 가운데가 두 줄이므로 가운데 두 행/열을 모두 1로 채운다.
+    """
+    _check_generator_size(n)
+    mids = {(n - 1) // 2, n // 2}      # 홀수 N: 한 줄 / 짝수 N: 두 줄
+    matrix = Matrix(n)
+    for r in range(n):
+        for c in range(n):
+            if r in mids or c in mids:
+                matrix.set(r, c, 1.0)
+    return matrix
+
+
+def generate_x(n):
+    """N x N X 패턴 생성: 주 대각선(r == c)과 반대 대각선(r + c == N-1)을 1로 채운다."""
+    _check_generator_size(n)
+    matrix = Matrix(n)
+    for i in range(n):
+        matrix.set(i, i, 1.0)
+        matrix.set(i, n - 1 - i, 1.0)
+    return matrix
 
 
 # =========================================================
@@ -180,6 +216,30 @@ def print_perf_table(entries):
         print(f"{label:<10}{value:<18}{n * n}")
 
 
+def print_mac_result(pattern, filter_a, filter_b, label_a="A", label_b="B"):
+    """
+    두 필터와 패턴의 MAC 점수/연산 시간/판정을 출력하고 (판정, 평균 시간 ms)를 반환한다.
+    모드 1(A/B)과 모드 3(Cross/X)이 함께 사용한다.
+    """
+    avg_a, score_a = measure_mac(pattern, filter_a)
+    avg_b, score_b = measure_mac(pattern, filter_b)
+    avg_ms = (avg_a + avg_b) / 2
+    verdict = judge(score_a, score_b, label_a, label_b)
+
+    if verdict == UNDECIDED:
+        print_section("[3] MAC 결과 (판정 불가)")
+    else:
+        print_section("[3] MAC 결과")
+    print(f"{label_a} 점수: {score_a!r}")
+    print(f"{label_b} 점수: {score_b!r}")
+    print(f"연산 시간(평균/{REPEAT}회): {avg_ms:.4f} ms")
+    if verdict == UNDECIDED:
+        print(f"판정: 판정 불가 (|{label_a}-{label_b}| < {EPSILON:g})")
+    else:
+        print(f"판정: {verdict}")
+    return verdict, avg_ms
+
+
 def run_user_mode():
     """모드 1: 필터 A, B와 패턴을 입력받아 MAC 점수/판정/연산 시간 출력"""
     print_section("[1] 필터 입력")
@@ -197,25 +257,67 @@ def run_user_mode():
     print("✓ 저장 확인 - 패턴")
     pattern.show()
 
-    avg_a, score_a = measure_mac(pattern, filter_a)
-    avg_b, score_b = measure_mac(pattern, filter_b)
-    avg_ms = (avg_a + avg_b) / 2
-    verdict = judge(score_a, score_b, "A", "B")
-
-    if verdict == UNDECIDED:
-        print_section("[3] MAC 결과 (판정 불가)")
-    else:
-        print_section("[3] MAC 결과")
-    print(f"A 점수: {score_a!r}")
-    print(f"B 점수: {score_b!r}")
-    print(f"연산 시간(평균/{REPEAT}회): {avg_ms:.4f} ms")
-    if verdict == UNDECIDED:
-        print(f"판정: 판정 불가 (|A-B| < {EPSILON:g})")
-    else:
-        print(f"판정: {verdict}")
+    _, avg_ms = print_mac_result(pattern, filter_a, filter_b)
 
     print_section(f"[4] 성능 분석 (평균/{REPEAT}회)")
     print_perf_table([(3, avg_ms)])
+
+
+# =========================================================
+# 3-2. 모드 3 (보너스): 패턴 생성기
+# =========================================================
+def read_size():
+    """생성할 크기 N 을 입력받는다. 정수가 아니거나 범위를 벗어나면 안내 후 재입력"""
+    while True:
+        raw = input(f"생성할 크기 N 입력 ({GEN_MIN_SIZE}~{GEN_MAX_SIZE}): ").strip()
+        try:
+            n = int(raw)
+        except ValueError:
+            print(f"입력 형식 오류: {GEN_MIN_SIZE} 이상 {GEN_MAX_SIZE} 이하의 정수를 입력하세요.")
+            continue
+        if not GEN_MIN_SIZE <= n <= GEN_MAX_SIZE:
+            print(f"입력 형식 오류: {GEN_MIN_SIZE} 이상 {GEN_MAX_SIZE} 이하의 정수를 입력하세요.")
+            continue
+        return n
+
+
+def read_pattern_choice():
+    """판별할 패턴 종류를 선택받는다. 반환: 표준 라벨(Cross 또는 X)"""
+    while True:
+        choice = input("판별할 패턴 선택 (1: Cross, 2: X): ").strip()
+        if choice == "1":
+            return CROSS
+        if choice == "2":
+            return X_LABEL
+        print("⚠️ 1 또는 2 중에서 선택해주세요.")
+
+
+def run_generator_mode():
+    """
+    모드 3: N x N Cross/X 필터를 자동 생성하고, 생성한 패턴 1개를 MAC 판정한 뒤
+    생성기로 만든 패턴으로 성능 분석까지 수행한다. (모드 1의 판정/출력 함수를 재사용)
+    """
+    print_section("[1] 패턴 생성")
+    n = read_size()
+    filter_cross, filter_x = generate_cross(n), generate_x(n)
+    print(f"\n✓ 생성 완료 - Cross {n}x{n}")
+    filter_cross.show()
+    print(f"✓ 생성 완료 - X {n}x{n}")
+    filter_x.show()
+
+    print_section("[2] 패턴 선택")
+    expected = read_pattern_choice()
+    pattern = generate_cross(n) if expected == CROSS else generate_x(n)
+    print(f"✓ 입력 패턴: 생성된 {expected} {n}x{n}")
+
+    verdict, _ = print_mac_result(pattern, filter_cross, filter_x, CROSS, X_LABEL)
+    print(f"expected: {expected} | {'PASS' if verdict == expected else 'FAIL'}")
+
+    print_section(f"[4] 성능 분석 (평균/{REPEAT}회, 생성기 패턴 사용)")
+    perf = []
+    for size in sorted(set(PERF_SIZES) | {n}):
+        perf.append((size, measure_mac(generate_cross(size), generate_x(size))[0]))
+    print_perf_table(perf)
 
 
 # =========================================================
@@ -389,12 +491,12 @@ def run_data_mode(path=DATA_FILE):
 
     # [3] 성능 분석 (3x3은 기본 예시, 나머지는 data.json의 필터/패턴 사용)
     print_section(f"[3] 성능 분석 (평균/{REPEAT}회)")
-    samples = {3: (Matrix.from_rows(SAMPLE_CROSS_3), Matrix.from_rows(SAMPLE_CROSS_3))}
+    samples = {3: (generate_cross(3), generate_x(3))}
     for r in results:
         if r["pattern"] is not None and r["size"] not in samples:
             samples[r["size"]] = (r["pattern"], filters[r["size"]][CROSS])
     perf = []
-    for n in sorted(set([3, 5, 13, 25]) | set(samples)):
+    for n in sorted(set(PERF_SIZES) | set(samples)):
         if n in samples:
             perf.append((n, measure_mac(samples[n][0], samples[n][1])[0]))
         else:
@@ -424,17 +526,20 @@ def main():
             print("\n[모드 선택]\n")
             print("1. 사용자 입력 (3x3)")
             print("2. data.json 분석")
+            print("3. 패턴 생성기 (Cross / X 자동 생성)")
             print("0. 종료")
             choice = input("선택: ").strip()
             if choice == "1":
                 run_user_mode()
             elif choice == "2":
                 run_data_mode()
+            elif choice == "3":
+                run_generator_mode()
             elif choice == "0":
                 print("👋 프로그램을 종료합니다.")
                 break
             else:
-                print("⚠️ 0, 1, 2 중에서 선택해주세요.")
+                print("⚠️ 0, 1, 2, 3 중에서 선택해주세요.")
     except (KeyboardInterrupt, EOFError):
         print("\n\n⚠️ 프로그램을 안전하게 종료합니다.")
         sys.exit(0)
