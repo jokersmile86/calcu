@@ -69,9 +69,14 @@ class Matrix:
                 # bool은 int의 하위 타입이므로 별도로 제외
                 if isinstance(value, bool) or not isinstance(value, (int, float)):
                     raise ValueError(f"숫자가 아닌 값이 있습니다. ({i + 1}행 {j + 1}열: {value!r})")
-                if not math.isfinite(value):
+                # 매우 큰 정수는 float 변환 과정에서 OverflowError가 날 수 있다.
+                try:
+                    numeric_value = float(value)
+                except (OverflowError, ValueError):
+                    raise ValueError(f"표현 가능한 숫자 범위를 벗어났습니다. ({i + 1}행 {j + 1}열)")
+                if not math.isfinite(numeric_value):
                     raise ValueError(f"유한한 숫자가 아닙니다. ({i + 1}행 {j + 1}열)")
-                matrix.set(i, j, float(value))
+                matrix.set(i, j, numeric_value)
         return matrix
 
     def show(self, indent="  "):
@@ -83,11 +88,13 @@ class Matrix:
 # 1-2. 보너스: 패턴 생성기 (N x N 십자가 / X)
 # =========================================================
 def _check_generator_size(n):
-    """생성 크기 검증. 정수이고 GEN_MIN_SIZE 이상이어야 한다."""
+    """생성 크기 검증. 정수이고 GEN_MIN_SIZE~GEN_MAX_SIZE 범위여야 한다."""
     if isinstance(n, bool) or not isinstance(n, int):
         raise ValueError("크기 N 은 정수여야 합니다.")
-    if n < GEN_MIN_SIZE:
-        raise ValueError(f"크기 N 은 {GEN_MIN_SIZE} 이상이어야 합니다. (입력 {n})")
+    if not GEN_MIN_SIZE <= n <= GEN_MAX_SIZE:
+        raise ValueError(
+            f"크기 N 은 {GEN_MIN_SIZE} 이상 {GEN_MAX_SIZE} 이하여야 합니다. (입력 {n})"
+        )
 
 
 def generate_cross(n):
@@ -143,7 +150,12 @@ def mac(pattern, filt):
     total = 0.0
     for i in range(pattern.size):
         for j in range(pattern.size):
-            total += pattern.get(i, j) * filt.get(i, j)
+            product = pattern.get(i, j) * filt.get(i, j)
+            if not math.isfinite(product):
+                raise ValueError(f"MAC 곱셈 결과가 유한하지 않습니다. ({i + 1}행 {j + 1}열)")
+            total += product
+            if not math.isfinite(total):
+                raise ValueError(f"MAC 누적 결과가 유한하지 않습니다. ({i + 1}행 {j + 1}열)")
     return total
 
 
@@ -152,6 +164,8 @@ def judge(score_a, score_b, label_a, label_b):
     두 점수를 허용오차(EPSILON) 기반으로 비교해 판정한다.
     float 연산은 0.9 와 0.8999999999999999 처럼 미세한 오차가 생기므로 == 를 쓰지 않는다.
     """
+    if not math.isfinite(score_a) or not math.isfinite(score_b):
+        raise ValueError("판정 점수는 유한한 숫자여야 합니다.")
     if abs(score_a - score_b) < EPSILON:
         return UNDECIDED
     return label_a if score_a > score_b else label_b
@@ -162,6 +176,8 @@ def measure_mac(pattern, filt, repeat=REPEAT):
     MAC 연산 구간만 repeat 회 측정해 (평균 시간 ms, 점수)를 반환한다.
     입력/출력/파일 읽기 시간은 포함하지 않는다.
     """
+    if isinstance(repeat, bool) or not isinstance(repeat, int) or repeat <= 0:
+        raise ValueError("측정 반복 횟수는 1 이상의 정수여야 합니다.")
     elapsed = []
     score = 0.0
     for _ in range(repeat):
@@ -221,10 +237,15 @@ def print_mac_result(pattern, filter_a, filter_b, label_a="A", label_b="B"):
     두 필터와 패턴의 MAC 점수/연산 시간/판정을 출력하고 (판정, 평균 시간 ms)를 반환한다.
     모드 1(A/B)과 모드 3(Cross/X)이 함께 사용한다.
     """
-    avg_a, score_a = measure_mac(pattern, filter_a)
-    avg_b, score_b = measure_mac(pattern, filter_b)
-    avg_ms = (avg_a + avg_b) / 2
-    verdict = judge(score_a, score_b, label_a, label_b)
+    try:
+        avg_a, score_a = measure_mac(pattern, filter_a)
+        avg_b, score_b = measure_mac(pattern, filter_b)
+        avg_ms = (avg_a + avg_b) / 2
+        verdict = judge(score_a, score_b, label_a, label_b)
+    except ValueError as e:
+        print_section("[3] MAC 연산 오류")
+        print(f"연산을 완료할 수 없습니다: {e}")
+        return UNDECIDED, None
 
     if verdict == UNDECIDED:
         print_section("[3] MAC 결과 (판정 불가)")
@@ -316,7 +337,11 @@ def run_generator_mode():
     print_section(f"[4] 성능 분석 (평균/{REPEAT}회, 생성기 패턴 사용)")
     perf = []
     for size in sorted(set(PERF_SIZES) | {n}):
-        perf.append((size, measure_mac(generate_cross(size), generate_x(size))[0]))
+        try:
+            avg_ms, _ = measure_mac(generate_cross(size), generate_x(size))
+        except ValueError:
+            avg_ms = None
+        perf.append((size, avg_ms))
     print_perf_table(perf)
 
 
@@ -491,6 +516,7 @@ def run_data_mode(path=DATA_FILE):
 
     # [3] 성능 분석 (3x3은 기본 예시, 나머지는 data.json의 필터/패턴 사용)
     print_section(f"[3] 성능 분석 (평균/{REPEAT}회)")
+    print("측정 기준: 크기별 첫 번째 유효 패턴 × Cross 필터의 MAC 연산 시간")
     samples = {3: (generate_cross(3), generate_x(3))}
     for r in results:
         if r["pattern"] is not None and r["size"] not in samples:
@@ -498,7 +524,11 @@ def run_data_mode(path=DATA_FILE):
     perf = []
     for n in sorted(set(PERF_SIZES) | set(samples)):
         if n in samples:
-            perf.append((n, measure_mac(samples[n][0], samples[n][1])[0]))
+            try:
+                avg_ms, _ = measure_mac(samples[n][0], samples[n][1])
+            except ValueError:
+                avg_ms = None
+            perf.append((n, avg_ms))
         else:
             perf.append((n, None))
     print_perf_table(perf)
